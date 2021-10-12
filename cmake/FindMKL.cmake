@@ -35,7 +35,7 @@ IF (WIN32)
     SET(DEFAULT_INTEL_COMPILER_DIR $ENV{MKLProductDir})
   ELSE()
     SET(DEFAULT_INTEL_COMPILER_DIR
-     "C:/Program Files (x86)/IntelSWTools/compilers_and_libraries/windows")
+     "C:/Program Files (x86)/Intel/oneAPI/mkl/2021.4.0")
   ENDIF()
   SET(DEFAULT_INTEL_MKL_DIR "${INTEL_COMPILER_DIR}/mkl")
 ELSE (WIN32)

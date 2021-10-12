@@ -1,3 +1,6 @@
+#On Windows, first install oneAPI from here https://software.intel.com/content/www/us/en/develop/tools/oneapi/base-toolkit/download.html?operatingsystem=window&distributions=webdownload&options=offline
+#and then run "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" 
+
 cmake_minimum_required(VERSION 3.1)
 project(sparse_solver_benchmark)
 
