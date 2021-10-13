@@ -2,7 +2,9 @@
 #and then run "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" 
 
 cmake_minimum_required(VERSION 3.1)
-project(sparse_solver_benchmark)
+project(sparse_solver_benchmark LANGUAGES CUDA CXX C) 
+
+find_package(CUDAToolkit)
 
 option(IGL_WITH_CHOLMOD   "Use Cholmod" ON)
 option(IGL_WITH_MKL       "Use Intel MKL" ON)
@@ -34,7 +36,7 @@ find_package(LIBIGL REQUIRED QUIET)
 if(LIBIGL_USE_STATIC_LIBRARY)
   file(GLOB SRCFILES include/igl/*.cpp)
 endif()
-list(APPEND SRCFILES main.cpp)
+list(APPEND SRCFILES main.cpp cusolver_solve.h)
 add_executable(${PROJECT_NAME} ${SRCFILES})
 
 target_link_libraries(${PROJECT_NAME} igl::core OpenMP::OpenMP_CXX)
@@ -91,3 +93,5 @@ function(add_framework target framework)
     endif()
 endfunction()
 add_framework(${PROJECT_NAME} Accelerate)
+
+target_link_libraries(${PROJECT_NAME} CUDA::cudart CUDA::cublas CUDA::cusparse)
