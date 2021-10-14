@@ -94,4 +94,4 @@ function(add_framework target framework)
 endfunction()
 add_framework(${PROJECT_NAME} Accelerate)
 
-target_link_libraries(${PROJECT_NAME} CUDA::cudart CUDA::cublas CUDA::cusparse)
+target_link_libraries(${PROJECT_NAME} CUDA::cudart CUDA::cublas CUDA::cusparse CUDA::cusolver)

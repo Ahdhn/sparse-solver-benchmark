@@ -12,6 +12,7 @@
 #include <igl/massmatrix.h>
 #include <igl/get_seconds.h>
 #include <igl/matlab_format.h>
+#include <igl/triangulated_grid.h>
 #include <Eigen/PardisoSupport>
 #include <Eigen/CholmodSupport>
 #include <tuple>
@@ -124,12 +125,11 @@ int main(int argc, char* argv[])
 
 	int num_devices = 0;;
 	cudaGetDeviceCount(&num_devices);
-	fprintf(stderr, "num_devices %d\n", num_devices);
+	fprintf(stderr, "num_devices= %d\n", num_devices);
 	
-
 	Eigen::MatrixXd V;
 	Eigen::MatrixXi F;
-	//igl::triangulated_grid(2,2,V,F);
+	//igl::triangulated_grid(5,5,V,F);
 	igl::read_triangle_mesh(argv[1], V, F);
 	Eigen::SparseMatrix<double> L;
 	igl::cotmatrix(V, F, L);
@@ -151,10 +151,15 @@ int main(int argc, char* argv[])
 		Q = M + W;
 		Eigen::MatrixXd rhs = M * V;
 
+		if (!Q.isCompressed()) {
+			Q.makeCompressed();
+		}
+
 		Eigen::MatrixXd U;
 		printf("\n");
-		printf("|                         Method |      Factor |       Solve |     L∞ norm |\n");
-		printf("|-------------------------------:|------------:|------------:|------------:|\n");
+		printf("|                         Method |      Factor |       Solve |     L_inf norm |\n");
+		printf("|-------------------------------:|------------:|------------:|---------------:|\n");
+		cusolver_solver("cusolverSpScsrlsvchol", Q, rhs, U);
 		solve<Eigen::CholmodSupernodalLLT<Eigen::SparseMatrix<double>>>("Eigen::CholmodSupernodalLLT", Q, rhs, U);
 		solve<Eigen::SimplicialLLT<Eigen::SparseMatrix<double>> >("Eigen::SimplicialLLT", Q, rhs, U);
 		solve<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>>("Eigen::SimplicialLDLT", Q, rhs, U);
