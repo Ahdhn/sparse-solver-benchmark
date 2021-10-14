@@ -150,7 +150,7 @@ int main(int argc, char* argv[])
 		Eigen::SparseMatrix<double> Q;
 		Q = M + W;
 		Eigen::MatrixXd rhs = M * V;
-
+        
 		if (!Q.isCompressed()) {
 			Q.makeCompressed();
 		}
@@ -159,7 +159,7 @@ int main(int argc, char* argv[])
 		printf("\n");
 		printf("|                         Method |      Factor |       Solve |     L_inf norm |\n");
 		printf("|-------------------------------:|------------:|------------:|---------------:|\n");
-        if (num_devices == 0) {
+        if (num_devices != 0) {
             cusolver_solver("cusolverSpScsrlsvchol", Q, rhs, U);
         }
 		solve<Eigen::CholmodSupernodalLLT<Eigen::SparseMatrix<double>>>("Eigen::CholmodSupernodalLLT", Q, rhs, U);
