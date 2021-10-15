@@ -20,9 +20,7 @@
 #include <cuda_runtime_api.h>
 #include "cusolver_solve.h"
 
-void spy(const std::string&           in_fileName,
-         Eigen::SparseMatrix<double>& mat,
-         bool                         convertToPNG = true)
+void spy(const std::string& in_fileName, Eigen::SparseMatrix<double>& mat, bool convertToPNG = true)
 {
     unsigned char* image = new unsigned char[mat.cols() * mat.rows() * 3];
     memset(image, 0, mat.cols() * mat.rows() * 3 * sizeof(unsigned char));
@@ -122,9 +120,8 @@ void solve<catamari::SparseLDL<double>>(const std::string&                 name,
 
     // Factor the matrix.
     catamari::SparseLDL<double>             ldl;
-    const catamari::SparseLDLResult<double> result =
-        ldl.Factor(matrix, ldl_control);
-    const double t_factor = tictoc();
+    const catamari::SparseLDLResult<double> result = ldl.Factor(matrix, ldl_control);
+    const double                            t_factor = tictoc();
     printf("%6.2g secs | ", t_factor);
 
     // copy rhs
@@ -193,45 +190,40 @@ int main(int argc, char* argv[])
         igl::harmonic(L, M, k, W);
         Eigen::SparseMatrix<double> Q;
         Q = M + W;
-        Eigen::MatrixXd rhs0 = M * V;
-        Eigen::MatrixXd rhs = rhs0.col(0);
+        Eigen::MatrixXd rhs = M * V;
+
 
         if (!Q.isCompressed()) {
             Q.makeCompressed();
         }
 
-        spy("Q_" + std::to_string(k), Q);
+        // spy("Q_" + std::to_string(k), Q);
 
         Eigen::MatrixXd U;
         printf("\n");
-        printf(
-            "|                         Method |      Factor |       Solve |    "
-            " L_inf norm |\n");
-        printf(
-            "|-------------------------------:|------------:|------------:|----"
-            "-----------:|\n");
+        printf("|                         Method |      Factor |       Solve |  L_inf norm |\n");
+        printf("|-------------------------------:|------------:|------------:|------------:|\n");
         if (num_devices != 0) {
-            cusolver_solver("cusolverSpScsrlsvchol", Q, rhs, U);
+            cusolver_solver_low_level("cusolverSpScsrlsvchol (Low)", Q, rhs, U);
+
+            cusolver_solver_high_level("cusolverSpScsrlsvchol (High)", Q, rhs, U);
         }
         solve<Eigen::CholmodSupernodalLLT<Eigen::SparseMatrix<double>>>(
             "Eigen::CholmodSupernodalLLT", Q, rhs, U);
-        solve<Eigen::SimplicialLLT<Eigen::SparseMatrix<double>>>(
-            "Eigen::SimplicialLLT", Q, rhs, U);
-        solve<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>>(
-            "Eigen::SimplicialLDLT", Q, rhs, U);
+        solve<Eigen::SimplicialLLT<Eigen::SparseMatrix<double>>>("Eigen::SimplicialLLT", Q, rhs, U);
+        solve<Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>>>("Eigen::SimplicialLDLT", Q, rhs,
+                                                                  U);
         solve<catamari::SparseLDL<double>>("catamari::SparseLDL", Q, rhs, U);
-        solve<Eigen::PardisoLLT<Eigen::SparseMatrix<double>>>(
-            "Eigen::PardisoLLT", Q, rhs, U);
-        solve<Eigen::SparseLU<Eigen::SparseMatrix<double>,
-                              Eigen::COLAMDOrdering<int>>>("Eigen::SparseLU", Q,
-                                                           rhs, U);
-        solve<Eigen::BiCGSTAB<Eigen::SparseMatrix<double>,
-                              Eigen::IncompleteLUT<double>>>(
+        solve<Eigen::PardisoLLT<Eigen::SparseMatrix<double>>>("Eigen::PardisoLLT", Q, rhs, U);
+        solve<Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>>>(
+            "Eigen::SparseLU", Q, rhs, U);
+        //solve<Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>>>(
+        //    "Eigen::SparseQR", Q, rhs, U);
+        solve<Eigen::BiCGSTAB<Eigen::SparseMatrix<double>, Eigen::IncompleteLUT<double>>>(
             "Eigen::BiCGSTAB<IncompleteLUT>", Q, rhs, U);
-        solve<
-            Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower,
-                                     Eigen::IncompleteLUT<double>>>(
-            "Eigen::CG<IncompleteLUT>", Q, rhs, U);
+        solve<Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower,
+                                       Eigen::IncompleteLUT<double>>>("Eigen::CG<IncompleteLUT>", Q,
+                                                                      rhs, U);
         printf("\n");
     }
 }

@@ -22,7 +22,7 @@ MacroBlockEnd:   ''
 MaxEmptyLinesToKeep: 2
 NamespaceIndentation: None 
 ObjCBlockIndentWidth: 2
-ColumnLimit:     80
+ColumnLimit:     100
 AlignConsecutiveDeclarations: true
 
 BreakBeforeBraces: Custom
