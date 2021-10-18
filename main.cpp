@@ -162,7 +162,7 @@ int main(int argc, char* argv[])
 
     Eigen::MatrixXd V;
     Eigen::MatrixXi F;
-    // igl::triangulated_grid(10, 10, V, F);
+    // igl::triangulated_grid(1000, 1000, V, F);
     igl::read_triangle_mesh(argv[1], V, F);
     Eigen::SparseMatrix<double> L;
     igl::cotmatrix(V, F, L);
@@ -203,6 +203,8 @@ int main(int argc, char* argv[])
             cusolver_solver_low_level("cusolverSpDcsrlsvchol (Low)", Q, rhs, U);
 
             cusolver_solver_low_level_preview("cusolverSpDcsrlsvchol (Preview)", Q, rhs, U);
+
+            cusparse_ic0_solver("cusparse_solver (IC0)", Q, rhs, U);
 
             cusolver_solver_high_level("cusolverSpDcsrlsvchol (High)", Q, rhs, U);
         }

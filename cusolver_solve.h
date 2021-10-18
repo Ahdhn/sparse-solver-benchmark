@@ -624,7 +624,7 @@ void cusolver_solver_low_level_preview(const std::string&           name,
     timer.stop();
     CUDA_ERROR(cudaStreamSynchronize(stream));
     printf("%6.2g secs | ", timer.elapsed_millis() * 0.001);
-        
+
     CUSOLVER_ERROR(cusolverSpDcsrcholZeroPivot(cusolver_handle, chol_info, tol, &singularity));
 
     if (0 <= singularity) {
@@ -674,4 +674,205 @@ void cusolver_solver_low_level_preview(const std::string&           name,
     CUSOLVER_ERROR(cusolverSpDestroy(cusolver_handle));
     CUDA_ERROR(cudaStreamDestroy(stream));
     CUSPARSE_ERROR(cusparseDestroyMatDescr(matQ_desc));
+}
+
+
+void cusparse_ic0_solver(const std::string&           name,
+                         Eigen::SparseMatrix<double>& Q,
+                         const Eigen::MatrixXd&       rhs,
+                         Eigen::MatrixXd&             U)
+{
+    // taken from https://docs.nvidia.com/cuda/cusparse/index.html#csric02
+    // M = L*L^{T}
+
+    if (Q.IsRowMajor()) {
+        printf("Error: Q is row major. No need to transpose it...\n");
+        exit(EXIT_FAILURE);
+    }
+    auto Q_trans = Q.transpose();
+
+    U.resize(rhs.rows(), rhs.cols());
+
+    printf("| %30s | ", name.c_str());
+
+    // create stream
+    cudaStream_t stream = NULL;
+    CUDA_ERROR(cudaStreamCreate(&stream));
+
+    // cuSPARSE handle
+    cusparseHandle_t cusparse_handle;
+    CUSPARSE_ERROR(cusparseCreate(&cusparse_handle));
+    CUSPARSE_ERROR(cusparseSetStream(cusparse_handle, stream));
+
+    // allocate and copy Q, rhs
+    double *d_Q_val, *d_rhs, *d_U, *d_z;  // intermediate result vector
+    int *   d_Q_rowPtr, *d_Q_ColInd;
+    double  tol = 1.0e-8;
+    int     singularity;
+
+    CUDA_ERROR(cudaMalloc((void**)&d_Q_val, Q_trans.nonZeros() * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_Q_rowPtr, (Q_trans.rows() + 1) * sizeof(int)));
+    CUDA_ERROR(cudaMalloc((void**)&d_Q_ColInd, Q_trans.nonZeros() * sizeof(int)));
+    CUDA_ERROR(cudaMalloc((void**)&d_rhs, Q_trans.rows() * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_U, Q_trans.rows() * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_z, Q_trans.rows() * sizeof(double)));
+
+    CUDA_ERROR(cudaMemcpy(d_Q_val, Q_trans.valuePtr(), Q_trans.nonZeros() * sizeof(double),
+                          cudaMemcpyHostToDevice));
+    CUDA_ERROR(cudaMemcpy(d_Q_rowPtr, Q_trans.outerIndexPtr(), (Q_trans.rows() + 1) * sizeof(int),
+                          cudaMemcpyHostToDevice));
+    CUDA_ERROR(cudaMemcpy(d_Q_ColInd, Q_trans.innerIndexPtr(), Q_trans.nonZeros() * sizeof(int),
+                          cudaMemcpyHostToDevice));
+
+
+    cusparseMatDescr_t          descr_M = 0;
+    cusparseMatDescr_t          descr_L = 0;
+    csric02Info_t               info_M = 0;
+    csrsv2Info_t                info_L = 0;
+    csrsv2Info_t                info_Lt = 0;
+    int                         pBufferSize_M;
+    int                         pBufferSize_L;
+    int                         pBufferSize_Lt;
+    int                         pBufferSize;
+    void*                       pBuffer = 0;
+    int                         structural_zero;
+    int                         numerical_zero;
+    const double                alpha = 1.0;
+    cusparseSolvePolicy_t       policy_M = CUSPARSE_SOLVE_POLICY_NO_LEVEL;
+    const cusparseSolvePolicy_t policy_L = CUSPARSE_SOLVE_POLICY_NO_LEVEL;
+    const cusparseSolvePolicy_t policy_Lt = CUSPARSE_SOLVE_POLICY_USE_LEVEL;
+    const cusparseOperation_t   trans_L = CUSPARSE_OPERATION_NON_TRANSPOSE;
+    const cusparseOperation_t   trans_Lt = CUSPARSE_OPERATION_TRANSPOSE;
+
+    // step 1: create a descriptor which contains
+    // - matrix M
+    // - matrix L
+    // - matrix L is lower triangular
+    // - matrix L has non-unit diagonal
+    CUSPARSE_ERROR(cusparseCreateMatDescr(&descr_M));
+    CUSPARSE_ERROR(cusparseCreateMatDescr(&descr_L));
+    CUSPARSE_ERROR(cusparseSetMatType(descr_M, CUSPARSE_MATRIX_TYPE_GENERAL));
+    CUSPARSE_ERROR(cusparseSetMatType(descr_L, CUSPARSE_MATRIX_TYPE_GENERAL));
+    if (Q_trans.outerIndexPtr()[0] == 0) {
+        // that should be always the case
+        CUSPARSE_ERROR(cusparseSetMatIndexBase(descr_M, CUSPARSE_INDEX_BASE_ZERO));
+        CUSPARSE_ERROR(cusparseSetMatIndexBase(descr_L, CUSPARSE_INDEX_BASE_ZERO));
+    } else {
+        CUSPARSE_ERROR(cusparseSetMatIndexBase(descr_M, CUSPARSE_INDEX_BASE_ONE));
+        CUSPARSE_ERROR(cusparseSetMatIndexBase(descr_L, CUSPARSE_INDEX_BASE_ONE));
+    }
+    CUSPARSE_ERROR(cusparseSetMatFillMode(descr_L, CUSPARSE_FILL_MODE_LOWER));
+    CUSPARSE_ERROR(cusparseSetMatDiagType(descr_L, CUSPARSE_DIAG_TYPE_NON_UNIT));
+
+    // step 2: create a empty info structure
+    // we need one info for csric02 and two info's for csrsv2
+    CUSPARSE_ERROR(cusparseCreateCsric02Info(&info_M));
+    CUSPARSE_ERROR(cusparseCreateCsrsv2Info(&info_L));
+    CUSPARSE_ERROR(cusparseCreateCsrsv2Info(&info_Lt));
+
+    // step 3: query how much memory used in csric02 and csrsv2, and allocate the buffer
+    CUSPARSE_ERROR(cusparseDcsric02_bufferSize(cusparse_handle, Q_trans.rows(), Q_trans.nonZeros(),
+                                               descr_M, d_Q_val, d_Q_rowPtr, d_Q_ColInd, info_M,
+                                               &pBufferSize_M));
+
+    CUSPARSE_ERROR(cusparseDcsrsv2_bufferSize(cusparse_handle, trans_L, Q_trans.rows(),
+                                              Q_trans.nonZeros(), descr_L, d_Q_val, d_Q_rowPtr,
+                                              d_Q_ColInd, info_L, &pBufferSize_L));
+
+    CUSPARSE_ERROR(cusparseDcsrsv2_bufferSize(cusparse_handle, trans_Lt, Q_trans.rows(),
+                                              Q_trans.nonZeros(), descr_L, d_Q_val, d_Q_rowPtr,
+                                              d_Q_ColInd, info_Lt, &pBufferSize_Lt));
+
+    pBufferSize = std::max(pBufferSize_M, std::max(pBufferSize_L, pBufferSize_Lt));
+
+    CUDA_ERROR(cudaMalloc((void**)&pBuffer, pBufferSize));
+
+
+    // step 4: perform analysis of incomplete Cholesky on M
+    //         perform analysis of triangular solve on L
+    //         perform analysis of triangular solve on L'
+    // The lower triangular part of M has the same sparsity pattern as L, so
+    // we can do analysis of csric02 and csrsv2 simultaneously.
+    CUSPARSE_ERROR(cusparseDcsric02_analysis(cusparse_handle, Q_trans.rows(), Q_trans.nonZeros(),
+                                             descr_M, d_Q_val, d_Q_rowPtr, d_Q_ColInd, info_M,
+                                             policy_M, pBuffer));
+    cusparseStatus_t status = cusparseXcsric02_zeroPivot(cusparse_handle, info_M, &structural_zero);
+    if (CUSPARSE_STATUS_ZERO_PIVOT == status) {
+        printf("\nA(%d,%d) is missing\n", structural_zero, structural_zero);
+    }
+    CUSPARSE_ERROR(cusparseDcsrsv2_analysis(cusparse_handle, trans_L, Q_trans.rows(),
+                                            Q_trans.nonZeros(), descr_L, d_Q_val, d_Q_rowPtr,
+                                            d_Q_ColInd, info_L, policy_L, pBuffer));
+    CUSPARSE_ERROR(cusparseDcsrsv2_analysis(cusparse_handle, trans_Lt, Q_trans.rows(),
+                                            Q_trans.nonZeros(), descr_L, d_Q_val, d_Q_rowPtr,
+                                            d_Q_ColInd, info_Lt, policy_Lt, pBuffer));
+
+
+    // step 5: M = L * L'
+    CUDATimer timer;
+    timer.start(stream);
+    CUSPARSE_ERROR(cusparseDcsric02(cusparse_handle, Q_trans.rows(), Q_trans.nonZeros(), descr_M,
+                                    d_Q_val, d_Q_rowPtr, d_Q_ColInd, info_M, policy_M, pBuffer));
+    timer.stop();
+    CUDA_ERROR(cudaStreamSynchronize(stream));
+
+    status = cusparseXcsric02_zeroPivot(cusparse_handle, info_M, &numerical_zero);
+    if (CUSPARSE_STATUS_ZERO_PIVOT == status) {
+        printf("\nL(%d,%d) is zero\n", numerical_zero, numerical_zero);
+    }
+    printf("%6.2g secs | ", (timer.elapsed_millis() * 0.001));
+
+    double total_time_ms = 0;
+    for (int d = 0; d < rhs.cols(); ++d) {
+
+
+        // Copy rhs to the device
+        CUDA_ERROR(cudaMemcpy(d_rhs, rhs.col(d).data(), Q_trans.rows() * sizeof(double),
+                              cudaMemcpyHostToDevice));
+
+        // init the solution to zero
+        CUDA_ERROR(cudaMemset(d_U, 0, Q_trans.rows() * sizeof(double)));
+        CUDA_ERROR(cudaMemset(d_z, 0, Q_trans.rows() * sizeof(double)));
+
+        timer.start(stream);
+
+        // step 6: solve L*z = x
+        CUSPARSE_ERROR(cusparseDcsrsv2_solve(
+            cusparse_handle, trans_L, Q_trans.rows(), Q_trans.nonZeros(), &alpha, descr_L, d_Q_val,
+            d_Q_rowPtr, d_Q_ColInd, info_L, d_rhs, d_z, policy_L, pBuffer));
+        // step 7: solve L'*y = z
+        CUSPARSE_ERROR(cusparseDcsrsv2_solve(
+            cusparse_handle, trans_Lt, Q_trans.rows(), Q_trans.nonZeros(), &alpha, descr_L, d_Q_val,
+            d_Q_rowPtr, d_Q_ColInd, info_Lt, d_z, d_U, policy_Lt, pBuffer));
+
+        timer.stop();
+        CUDA_ERROR(cudaStreamSynchronize(stream));
+
+        total_time_ms += timer.elapsed_millis();
+
+        // copy solution back to the host
+        CUDA_ERROR(cudaMemcpy(U.col(d).data(), d_U, Q_trans.rows() * sizeof(double),
+                              cudaMemcpyDeviceToHost));
+    }
+
+    printf("%6.2g secs | ", (total_time_ms * 0.001));
+    printf("%6.6g |\n", (rhs - Q * U).array().abs().maxCoeff());
+
+    // free device memory
+    CUDA_ERROR(cudaFree(d_Q_val));
+    CUDA_ERROR(cudaFree(d_Q_rowPtr));
+    CUDA_ERROR(cudaFree(d_Q_ColInd));
+    CUDA_ERROR(cudaFree(d_rhs));
+    CUDA_ERROR(cudaFree(d_U));
+    CUDA_ERROR(cudaFree(d_z));
+    CUDA_ERROR(cudaFree(pBuffer));
+
+    CUDA_ERROR(cudaStreamDestroy(stream));
+    CUSPARSE_ERROR(cusparseDestroyMatDescr(descr_M));
+    CUSPARSE_ERROR(cusparseDestroyCsric02Info(info_M));
+
+    CUSPARSE_ERROR(cusparseDestroyMatDescr(descr_L));
+    CUSPARSE_ERROR(cusparseDestroyCsrsv2Info(info_L));
+    CUSPARSE_ERROR(cusparseDestroyCsrsv2Info(info_Lt));
+    CUSPARSE_ERROR(cusparseDestroy(cusparse_handle));
 }
