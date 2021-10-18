@@ -1,6 +1,7 @@
 #pragma once
 #include <cuda_runtime_api.h>
 #include <cusolverSp.h>
+#include <cusolverSp_LOWLEVEL_PREVIEW.h>
 #include <cusparse.h>
 #include <omp.h>
 #include <stdio.h>
@@ -521,6 +522,156 @@ void cusolver_solver_low_level(const std::string&           name,
 
     CUSOLVER_ERROR(cusolverSpDestroy(cusolver_handle));
     CUSPARSE_ERROR(cusparseDestroy(cusparse_handle));
+    CUDA_ERROR(cudaStreamDestroy(stream));
+    CUSPARSE_ERROR(cusparseDestroyMatDescr(matQ_desc));
+}
+
+void cusolver_solver_low_level_preview(const std::string&           name,
+                                       Eigen::SparseMatrix<double>& Q,
+                                       const Eigen::MatrixXd&       rhs,
+                                       Eigen::MatrixXd&             U)
+{
+    if (Q.IsRowMajor()) {
+        printf("Error: Q is row major. No need to transpose it...\n");
+        exit(EXIT_FAILURE);
+    }
+    auto Q_trans = Q.transpose();
+
+    U.resize(rhs.rows(), rhs.cols());
+
+    printf("| %30s | ", name.c_str());
+
+    // create stream
+    cudaStream_t stream = NULL;
+    CUDA_ERROR(cudaStreamCreate(&stream));
+
+    // create cusolver handle
+    cusolverSpHandle_t cusolver_handle = NULL;
+    CUSOLVER_ERROR(cusolverSpCreate(&cusolver_handle));
+
+    // set cusolver and cusparse stream
+    CUSOLVER_ERROR(cusolverSpSetStream(cusolver_handle, stream));
+
+    // cholesky cst info
+    csrcholInfo_t chol_info;
+    CUSOLVER_ERROR(cusolverSpCreateCsrcholInfo(&chol_info));
+
+    // configure matrix descriptor
+    cusparseMatDescr_t matQ_desc = NULL;
+    CUSPARSE_ERROR(cusparseCreateMatDescr(&matQ_desc));
+    CUSPARSE_ERROR(cusparseSetMatType(matQ_desc, CUSPARSE_MATRIX_TYPE_GENERAL));
+    if (Q_trans.outerIndexPtr()[0] == 0) {
+        // that should be always the case
+        CUSPARSE_ERROR(cusparseSetMatIndexBase(matQ_desc, CUSPARSE_INDEX_BASE_ZERO));
+    } else {
+        CUSPARSE_ERROR(cusparseSetMatIndexBase(matQ_desc, CUSPARSE_INDEX_BASE_ONE));
+    }
+
+    // sanity check to make sure Q is symmetric
+    int issym = 0;
+    CUSOLVER_ERROR(cusolverSpXcsrissymHost(
+        cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(), matQ_desc, Q_trans.outerIndexPtr(),
+        Q_trans.outerIndexPtr() + 1, Q_trans.innerIndexPtr(), &issym));
+
+    if (!issym) {
+        printf("Error: Q is not symmetric...\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // allocate and copy Q, rhs
+    double *d_Q_val, *d_rhs, *d_U;
+    int *   d_Q_rowPtr, *d_Q_ColInd;
+    double  tol = 1.0e-8;
+    int     singularity;
+
+    CUDA_ERROR(cudaMalloc((void**)&d_Q_val, Q_trans.nonZeros() * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_Q_rowPtr, (Q_trans.rows() + 1) * sizeof(int)));
+    CUDA_ERROR(cudaMalloc((void**)&d_Q_ColInd, Q_trans.nonZeros() * sizeof(int)));
+    CUDA_ERROR(cudaMalloc((void**)&d_rhs, Q_trans.rows() * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_U, Q_trans.rows() * sizeof(double)));
+
+    CUDA_ERROR(cudaMemcpy(d_Q_val, Q_trans.valuePtr(), Q_trans.nonZeros() * sizeof(double),
+                          cudaMemcpyHostToDevice));
+
+    CUDA_ERROR(cudaMemcpy(d_Q_rowPtr, Q_trans.outerIndexPtr(), (Q_trans.rows() + 1) * sizeof(int),
+                          cudaMemcpyHostToDevice));
+
+    CUDA_ERROR(cudaMemcpy(d_Q_ColInd, Q_trans.innerIndexPtr(), Q_trans.nonZeros() * sizeof(int),
+                          cudaMemcpyHostToDevice));
+
+    // 1. analysis
+    CUSOLVER_ERROR(cusolverSpXcsrcholAnalysis(cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(),
+                                              matQ_desc, d_Q_rowPtr, d_Q_ColInd, chol_info));
+
+
+    size_t internalDataInBytes = 0;
+    size_t workspaceInBytes = 0;
+
+    // 2. allocate buffer
+    CUSOLVER_ERROR(cusolverSpDcsrcholBufferInfo(
+        cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(), matQ_desc, d_Q_val, d_Q_rowPtr,
+        d_Q_ColInd, chol_info, &internalDataInBytes, &workspaceInBytes));
+
+    void* chol_buffer;
+    CUDA_ERROR(cudaMalloc((void**)&chol_buffer, workspaceInBytes));
+
+    // 3. factor
+    CUDATimer timer;
+    timer.start(stream);
+    CUSOLVER_ERROR(cusolverSpDcsrcholFactor(cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(),
+                                            matQ_desc, d_Q_val, d_Q_rowPtr, d_Q_ColInd, chol_info,
+                                            chol_buffer));
+    timer.stop();
+    CUDA_ERROR(cudaStreamSynchronize(stream));
+    printf("%6.2g secs | ", timer.elapsed_millis() * 0.001);
+        
+    CUSOLVER_ERROR(cusolverSpDcsrcholZeroPivot(cusolver_handle, chol_info, tol, &singularity));
+
+    if (0 <= singularity) {
+        printf("WARNING: the matrix is singular at row %d under tol (%E)\n", singularity, tol);
+    }
+
+    // 4. solve
+    double total_time_ms = 0;
+    for (int d = 0; d < rhs.cols(); ++d) {
+
+        // Copy rhs to the device
+        CUDA_ERROR(cudaMemcpy(d_rhs, rhs.col(d).data(), Q_trans.rows() * sizeof(double),
+                              cudaMemcpyHostToDevice));
+
+        // init the solution to zero
+        CUDA_ERROR(cudaMemset(d_U, 0, Q_trans.rows() * sizeof(double)));
+
+        timer.start(stream);
+
+        // Solve using cholesky factorization
+        CUSOLVER_ERROR(cusolverSpDcsrcholSolve(cusolver_handle, Q_trans.rows(), d_rhs, d_U,
+                                               chol_info, chol_buffer));
+
+        timer.stop();
+        CUDA_ERROR(cudaStreamSynchronize(stream));
+
+
+        total_time_ms += timer.elapsed_millis();
+
+        // copy solution back to the host
+        CUDA_ERROR(cudaMemcpy(U.col(d).data(), d_U, Q_trans.rows() * sizeof(double),
+                              cudaMemcpyDeviceToHost));
+    }
+
+    printf("%6.2g secs | ", (total_time_ms * 0.001));
+
+    printf("%6.6g |\n", (rhs - Q * U).array().abs().maxCoeff());
+
+    // free device memory
+    CUDA_ERROR(cudaFree(d_Q_val));
+    CUDA_ERROR(cudaFree(d_Q_rowPtr));
+    CUDA_ERROR(cudaFree(d_Q_ColInd));
+    CUDA_ERROR(cudaFree(d_rhs));
+    CUDA_ERROR(cudaFree(d_U));
+    CUDA_ERROR(cudaFree(chol_buffer));
+
+    CUSOLVER_ERROR(cusolverSpDestroy(cusolver_handle));
     CUDA_ERROR(cudaStreamDestroy(stream));
     CUSPARSE_ERROR(cusparseDestroyMatDescr(matQ_desc));
 }

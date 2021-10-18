@@ -22,9 +22,8 @@
 
 void spy(const std::string& in_fileName, Eigen::SparseMatrix<double>& mat, bool convertToPNG = true)
 {
-    unsigned char* image = new unsigned char[mat.cols() * mat.rows() * 3];
-    memset(image, 0, mat.cols() * mat.rows() * 3 * sizeof(unsigned char));
 
+    std::vector<unsigned char> image(mat.cols() * mat.rows() * 3, 0);
 
     for (int k = 0; k < mat.outerSize(); ++k) {
         for (Eigen::SparseMatrix<double>::InnerIterator it(mat, k); it; ++it) {
@@ -46,7 +45,7 @@ void spy(const std::string& in_fileName, Eigen::SparseMatrix<double>& mat, bool 
     ss << mat.rows();
     ss << " 255" << std::endl;
     of << ss.str();
-    of.write(reinterpret_cast<const char*>(image),
+    of.write(reinterpret_cast<const char*>(image.data()),
              mat.cols() * mat.rows() * 3 * sizeof(unsigned char));
     of.close();
 
@@ -60,9 +59,6 @@ void spy(const std::string& in_fileName, Eigen::SparseMatrix<double>& mat, bool 
         ssf2 << ".png";
         system(ssf2.str().c_str());
     }
-
-    // free image
-    delete[] image;
 }
 
 template <typename Factor>
@@ -166,7 +162,7 @@ int main(int argc, char* argv[])
 
     Eigen::MatrixXd V;
     Eigen::MatrixXi F;
-    // igl::triangulated_grid(100, 100, V, F);
+    // igl::triangulated_grid(10, 10, V, F);
     igl::read_triangle_mesh(argv[1], V, F);
     Eigen::SparseMatrix<double> L;
     igl::cotmatrix(V, F, L);
@@ -196,7 +192,7 @@ int main(int argc, char* argv[])
         if (!Q.isCompressed()) {
             Q.makeCompressed();
         }
-
+        printf("matrix rows= %d, cols= %d, nnz= %d", Q.rows(), Q.cols(), Q.nonZeros());
         // spy("Q_" + std::to_string(k), Q);
 
         Eigen::MatrixXd U;
@@ -204,9 +200,11 @@ int main(int argc, char* argv[])
         printf("|                         Method |      Factor |       Solve |  L_inf norm |\n");
         printf("|-------------------------------:|------------:|------------:|------------:|\n");
         if (num_devices != 0) {
-            cusolver_solver_low_level("cusolverSpScsrlsvchol (Low)", Q, rhs, U);
+            cusolver_solver_low_level("cusolverSpDcsrlsvchol (Low)", Q, rhs, U);
 
-            cusolver_solver_high_level("cusolverSpScsrlsvchol (High)", Q, rhs, U);
+            cusolver_solver_low_level_preview("cusolverSpDcsrlsvchol (Preview)", Q, rhs, U);
+
+            cusolver_solver_high_level("cusolverSpDcsrlsvchol (High)", Q, rhs, U);
         }
         solve<Eigen::CholmodSupernodalLLT<Eigen::SparseMatrix<double>>>(
             "Eigen::CholmodSupernodalLLT", Q, rhs, U);
@@ -217,7 +215,7 @@ int main(int argc, char* argv[])
         solve<Eigen::PardisoLLT<Eigen::SparseMatrix<double>>>("Eigen::PardisoLLT", Q, rhs, U);
         solve<Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>>>(
             "Eigen::SparseLU", Q, rhs, U);
-        //solve<Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>>>(
+        // solve<Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>>>(
         //    "Eigen::SparseQR", Q, rhs, U);
         solve<Eigen::BiCGSTAB<Eigen::SparseMatrix<double>, Eigen::IncompleteLUT<double>>>(
             "Eigen::BiCGSTAB<IncompleteLUT>", Q, rhs, U);
