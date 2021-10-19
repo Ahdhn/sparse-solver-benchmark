@@ -202,14 +202,12 @@ int main(int argc, char* argv[])
         printf("|                         Method |      Factor |       Solve |  L_inf norm |\n");
         printf("|-------------------------------:|------------:|------------:|------------:|\n");
         if (num_devices != 0) {
-            cusolver_solver_low_level("cusolver (Low)", Q, rhs, U);
-
-            //cusolver_solver_low_level_preview("cusolver (Preview)", Q, rhs, U);
-
             cusolver_solver_low_level_preview_reordered("cusolver (Preview/reorder)", Q, rhs, U);
-            // cusparse_ic0_solver("cusparse_solver (IC0)", Q, rhs, U);
-
             cusolver_solver_high_level("cusolver (High)", Q, rhs, U);
+
+            //cusolver_solver_low_level("cusolver (Low)", Q, rhs, U);
+            //cusolver_solver_low_level_preview("cusolver (Preview)", Q, rhs, U);            
+            // cusparse_ic0_solver("cusparse_solver (IC0)", Q, rhs, U);
         }
         solve<Eigen::CholmodSupernodalLLT<Eigen::SparseMatrix<double>>>(
             "Eigen::CholmodSupernodalLLT", Q, rhs, U);
