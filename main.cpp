@@ -156,7 +156,7 @@ int main(int argc, char* argv[])
 #endif
 
     int num_devices = 0;
-    ;
+
     cudaGetDeviceCount(&num_devices);
     fprintf(stderr, "num_devices= %d\n", num_devices);
 
@@ -192,6 +192,8 @@ int main(int argc, char* argv[])
         if (!Q.isCompressed()) {
             Q.makeCompressed();
         }
+
+
         printf("matrix rows= %d, cols= %d, nnz= %d", Q.rows(), Q.cols(), Q.nonZeros());
         // spy("Q_" + std::to_string(k), Q);
 
@@ -200,13 +202,14 @@ int main(int argc, char* argv[])
         printf("|                         Method |      Factor |       Solve |  L_inf norm |\n");
         printf("|-------------------------------:|------------:|------------:|------------:|\n");
         if (num_devices != 0) {
-            cusolver_solver_low_level("cusolverSpDcsrlsvchol (Low)", Q, rhs, U);
+            cusolver_solver_low_level("cusolver (Low)", Q, rhs, U);
 
-            cusolver_solver_low_level_preview("cusolverSpDcsrlsvchol (Preview)", Q, rhs, U);
+            //cusolver_solver_low_level_preview("cusolver (Preview)", Q, rhs, U);
 
-            cusparse_ic0_solver("cusparse_solver (IC0)", Q, rhs, U);
+            cusolver_solver_low_level_preview_reordered("cusolver (Preview/reorder)", Q, rhs, U);
+            // cusparse_ic0_solver("cusparse_solver (IC0)", Q, rhs, U);
 
-            cusolver_solver_high_level("cusolverSpDcsrlsvchol (High)", Q, rhs, U);
+            cusolver_solver_high_level("cusolver (High)", Q, rhs, U);
         }
         solve<Eigen::CholmodSupernodalLLT<Eigen::SparseMatrix<double>>>(
             "Eigen::CholmodSupernodalLLT", Q, rhs, U);

@@ -677,6 +677,306 @@ void cusolver_solver_low_level_preview(const std::string&           name,
 }
 
 
+void cusolver_solver_low_level_preview_reordered(const std::string&           name,
+                                                 Eigen::SparseMatrix<double>& Q,
+                                                 const Eigen::MatrixXd&       rhs,
+                                                 Eigen::MatrixXd&             U)
+{
+    /*
+     * solves Q*U = rhs
+     * step 1: B = Q(A,A) = A*Q*A'
+     *   A is the ordering to minimize zero fill-in
+     * step 2: solve B*z = A*rhs for z
+     * step 3: U = inv(A)*z
+     * The three steps are
+     *  (A*Q*A')*(A*U) = (A*rhs)
+     */
+    if (Q.IsRowMajor()) {
+        printf("Error: Q is row major. No need to transpose it...\n");
+        exit(EXIT_FAILURE);
+    }
+    auto Q_trans = Q.transpose();
+
+    U.resize(rhs.rows(), rhs.cols());
+
+    printf("| %30s | ", name.c_str());
+
+    // create stream
+    cudaStream_t stream = NULL;
+    CUDA_ERROR(cudaStreamCreate(&stream));
+
+    // create cusparse handle
+    cusparseHandle_t cusparse_handle = NULL;
+    CUSPARSE_ERROR(cusparseCreate(&cusparse_handle));
+
+    // create cusolver handle
+    cusolverSpHandle_t cusolver_handle = NULL;
+    CUSOLVER_ERROR(cusolverSpCreate(&cusolver_handle));
+
+    // set cusolver and cusparse stream
+    CUSOLVER_ERROR(cusolverSpSetStream(cusolver_handle, stream));
+    CUSPARSE_ERROR(cusparseSetStream(cusparse_handle, stream));
+
+    // configure matrix descriptor
+    cusparseMatDescr_t matQ_desc = NULL;
+    CUSPARSE_ERROR(cusparseCreateMatDescr(&matQ_desc));
+    CUSPARSE_ERROR(cusparseSetMatType(matQ_desc, CUSPARSE_MATRIX_TYPE_GENERAL));
+    if (Q_trans.outerIndexPtr()[0] == 0) {
+        // that should be always the case
+        CUSPARSE_ERROR(cusparseSetMatIndexBase(matQ_desc, CUSPARSE_INDEX_BASE_ZERO));
+    } else {
+        CUSPARSE_ERROR(cusparseSetMatIndexBase(matQ_desc, CUSPARSE_INDEX_BASE_ONE));
+    }
+
+    // sanity check to make sure Q is symmetric
+    int issym = 0;
+    CUSOLVER_ERROR(cusolverSpXcsrissymHost(
+        cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(), matQ_desc, Q_trans.outerIndexPtr(),
+        Q_trans.outerIndexPtr() + 1, Q_trans.innerIndexPtr(), &issym));
+
+    if (!issym) {
+        printf("Error: Q is not symmetric...\n");
+        exit(EXIT_FAILURE);
+    }
+
+
+    // A*rhs
+    double* h_Arhs = (double*)malloc(sizeof(double) * Q_trans.rows());
+    double* d_Arhs = NULL;
+    CUDA_ERROR(cudaMalloc((void**)&d_Arhs, sizeof(double) * Q.rows()));
+
+    // reorder mat to reduce zero fill-in
+    int* h_A = (int*)malloc(sizeof(int) * Q.rows());
+    int* d_A = NULL;
+    CUDA_ERROR(cudaMalloc((void**)&d_A, sizeof(int) * Q.rows()));
+
+    // B: used in B*z = A*rhs
+    int*    h_B_rowPtr = (int*)malloc(sizeof(int) * (Q_trans.rows() + 1));
+    int*    h_B_colInd = (int*)malloc(sizeof(int) * Q_trans.nonZeros());
+    double* h_B_val = (double*)malloc(sizeof(double) * Q_trans.nonZeros());
+    int *   d_B_rowPtr, *d_B_colInd;
+    double* d_B_val;
+    CUDA_ERROR(cudaMalloc((void**)&d_B_rowPtr, sizeof(int) * (Q_trans.rows() + 1)));
+    CUDA_ERROR(cudaMalloc((void**)&d_B_colInd, sizeof(int) * Q_trans.nonZeros()));
+    CUDA_ERROR(cudaMalloc((void**)&d_B_val, sizeof(double) * Q_trans.nonZeros()));
+
+
+    // working space for permutation: B = A*Q*A^T
+    size_t size_perm = 0;
+    void*  perm_buffer_cpu = NULL;
+
+    // Map from Q values to B
+    int* h_mapBfromQ = (int*)malloc(sizeof(int) * Q_trans.nonZeros());
+    for (int j = 0; j < Q_trans.nonZeros(); j++) {
+        h_mapBfromQ[j] = j;
+    }
+
+    // Allocate and move Q, and U to the device
+    double *d_Q_val, *d_U, *d_z;  // z = B \ A*rhs
+    int *   d_Q_rowPtr, *d_Q_ColInd;
+    CUDA_ERROR(cudaMalloc((void**)&d_Q_val, Q_trans.nonZeros() * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_Q_rowPtr, (Q_trans.rows() + 1) * sizeof(int)));
+    CUDA_ERROR(cudaMalloc((void**)&d_Q_ColInd, Q_trans.nonZeros() * sizeof(int)));
+    CUDA_ERROR(cudaMalloc((void**)&d_U, Q_trans.rows() * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_z, Q_trans.rows() * sizeof(double)));
+
+    CUDA_ERROR(cudaMemcpyAsync(d_Q_val, Q_trans.valuePtr(), Q_trans.nonZeros() * sizeof(double),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_ERROR(cudaMemcpyAsync(d_Q_rowPtr, Q_trans.outerIndexPtr(),
+                               (Q_trans.rows() + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_ERROR(cudaMemcpyAsync(d_Q_ColInd, Q_trans.innerIndexPtr(),
+                               Q_trans.nonZeros() * sizeof(int), cudaMemcpyHostToDevice, stream));
+
+
+    // Step 1: reorder the matrix Q to minimize zero fill-in
+    //
+    // 0 = no reorder -> Q = 0:n-1
+    // 1 = symrcm ->  A = symrcm(Q)
+    // 2 = symamd ->  A = symamd(Q)
+    // 3 =  metisnd ->  A = metis(Q)
+    double factor_time_ms = 0;
+
+    CPUTimer cpu_timer;
+    cpu_timer.start();
+    int reorder = 3;
+    if (reorder == 1) {
+        CUSOLVER_ERROR(cusolverSpXcsrsymrcmHost(cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(),
+                                                matQ_desc, Q_trans.outerIndexPtr(),
+                                                Q_trans.innerIndexPtr(), h_A));
+    } else if (reorder == 2) {
+        CUSOLVER_ERROR(cusolverSpXcsrsymamdHost(cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(),
+                                                matQ_desc, Q_trans.outerIndexPtr(),
+                                                Q_trans.innerIndexPtr(), h_A));
+    } else if (reorder == 3) {
+        CUSOLVER_ERROR(cusolverSpXcsrmetisndHost(
+            cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(), matQ_desc, Q_trans.outerIndexPtr(),
+            Q_trans.innerIndexPtr(), NULL, h_A));
+    } else {
+#pragma omp parallel for
+        for (int j = 0; j < Q_trans.rows(); ++j) {
+            h_A[j] = j;
+        }
+    }
+
+// perm mat B -- we have to copy Q into B since permutation happens in-place
+#pragma omp parallel for
+    for (int j = 0; j < Q_trans.rows() + 1; ++j) {
+        h_B_rowPtr[j] = Q_trans.outerIndexPtr()[j];
+    }
+#pragma omp parallel for
+    for (int j = 0; j < Q_trans.nonZeros(); ++j) {
+        h_B_colInd[j] = Q_trans.innerIndexPtr()[j];
+    }
+    cpu_timer.stop();
+    factor_time_ms += cpu_timer.elapsed_millis();
+
+    // get the size of cpu buffer needed for permutation
+    CUSOLVER_ERROR(cusolverSpXcsrperm_bufferSizeHost(cusolver_handle, Q_trans.rows(),
+                                                     Q_trans.cols(), Q_trans.nonZeros(), matQ_desc,
+                                                     h_B_rowPtr, h_B_colInd, h_A, h_A, &size_perm));
+
+    perm_buffer_cpu = (void*)malloc(sizeof(char) * size_perm);
+    assert(NULL != perm_buffer_cpu);
+
+    cpu_timer.start();
+    // do the permutation which works only on the col and row indices
+    CUSOLVER_ERROR(cusolverSpXcsrpermHost(cusolver_handle, Q_trans.rows(), Q_trans.cols(),
+                                          Q_trans.nonZeros(), matQ_desc, h_B_rowPtr, h_B_colInd,
+                                          h_A, h_A, h_mapBfromQ, perm_buffer_cpu));
+
+// update permutation matrix value by using the mapping from Q such that
+// B = Q( mapBfromQ )
+#pragma omp parallel for
+    for (int j = 0; j < Q_trans.nonZeros(); j++) {
+        h_B_val[j] = Q_trans.valuePtr()[h_mapBfromQ[j]];
+    }
+    cpu_timer.stop();
+    factor_time_ms += cpu_timer.elapsed_millis();
+
+
+    // Move B, A*rhs, and A to device
+    CUDA_ERROR(cudaMemcpyAsync(d_A, h_A, sizeof(int) * Q.rows(), cudaMemcpyHostToDevice, stream));
+    CUDA_ERROR(cudaMemcpyAsync(d_B_rowPtr, h_B_rowPtr, sizeof(int) * (Q_trans.rows() + 1),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_ERROR(cudaMemcpyAsync(d_B_colInd, h_B_colInd, sizeof(int) * Q_trans.nonZeros(),
+                               cudaMemcpyHostToDevice, stream));
+    CUDA_ERROR(cudaMemcpyAsync(d_B_val, h_B_val, sizeof(double) * Q_trans.nonZeros(),
+                               cudaMemcpyHostToDevice, stream));
+
+    CUDA_ERROR(cudaDeviceSynchronize());
+
+
+    // cholesky csr info
+    csrcholInfo_t chol_info;
+    CUSOLVER_ERROR(cusolverSpCreateCsrcholInfo(&chol_info));
+
+    // cholesky analysis
+    CUSOLVER_ERROR(cusolverSpXcsrcholAnalysis(cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(),
+                                              matQ_desc, d_B_rowPtr, d_B_colInd, chol_info));
+
+    size_t internalDataInBytes = 0;
+    size_t workspaceInBytes = 0;
+
+    // allocate cholesky buffer
+    CUSOLVER_ERROR(cusolverSpDcsrcholBufferInfo(
+        cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(), matQ_desc, d_B_val, d_B_rowPtr,
+        d_B_colInd, chol_info, &internalDataInBytes, &workspaceInBytes));
+
+    void* chol_buffer;
+    CUDA_ERROR(cudaMalloc((void**)&chol_buffer, workspaceInBytes));
+
+
+    // cholesky factor
+    CUDATimer timer;
+    timer.start(stream);
+    CUSOLVER_ERROR(cusolverSpDcsrcholFactor(cusolver_handle, Q_trans.rows(), Q_trans.nonZeros(),
+                                            matQ_desc, d_B_val, d_B_rowPtr, d_B_colInd, chol_info,
+                                            chol_buffer));
+    timer.stop();
+    CUDA_ERROR(cudaStreamSynchronize(stream));
+
+    factor_time_ms += timer.elapsed_millis();
+    printf("%6.2g secs | ", (factor_time_ms * 0.001));
+
+    double tol = 1.0e-8;
+    int    singularity;
+
+    CUSOLVER_ERROR(cusolverSpDcsrcholZeroPivot(cusolver_handle, chol_info, tol, &singularity));
+    if (0 <= singularity) {
+        printf("WARNING: the matrix is singular at row %d under tol (%E)\n", singularity, tol);
+    }
+
+
+    // Solve -- treating each column in rhs as a different rhs
+    double solve_time_ms = 0;
+    for (int col = 0; col < rhs.cols(); ++col) {
+
+        // h_Arhs = rhs(A)
+#pragma omp parallel for
+        for (int row = 0; row < Q_trans.rows(); row++) {
+            assert(h_A[row] < Q_trans.cols());
+            h_Arhs[row] = rhs.col(col)[h_A[row]];
+        }
+        CUDA_ERROR(cudaMemcpyAsync(d_Arhs, h_Arhs, sizeof(double) * Q.rows(),
+                                   cudaMemcpyHostToDevice, stream));
+
+        // init the solution to zero
+        CUDA_ERROR(cudaMemset(d_z, 0, Q_trans.rows() * sizeof(double)));
+
+        // CUDATimer timer;
+        timer.start(stream);
+
+        // solve B*z = A*rhs
+        CUSOLVER_ERROR(cusolverSpDcsrcholSolve(cusolver_handle, Q_trans.rows(), d_Arhs, d_z,
+                                               chol_info, chol_buffer));
+
+        // solve A*u = z
+        CUSPARSE_ERROR(cusparseDsctr(cusparse_handle, Q_trans.rows(), d_z, d_A, d_U,
+                                     CUSPARSE_INDEX_BASE_ZERO));
+
+        timer.stop();
+        CUDA_ERROR(cudaStreamSynchronize(stream));
+
+        solve_time_ms += timer.elapsed_millis();
+
+        if (0 <= singularity) {
+            printf("WARNING: the matrix is singular at row %d under tol (%E)\n", singularity, tol);
+        }
+
+        // copy solution back to the host
+        CUDA_ERROR(cudaMemcpy(U.col(col).data(), d_U, Q_trans.rows() * sizeof(double),
+                              cudaMemcpyDeviceToHost));
+    }
+
+    printf("%6.2g secs | ", (solve_time_ms * 0.001));
+
+    printf("%6.6g |\n", (rhs - Q * U).array().abs().maxCoeff());
+
+    // free device memory
+    CUDA_ERROR(cudaFree(d_Q_val));
+    CUDA_ERROR(cudaFree(d_Q_rowPtr));
+    CUDA_ERROR(cudaFree(d_Q_ColInd));
+    CUDA_ERROR(cudaFree(d_B_rowPtr));
+    CUDA_ERROR(cudaFree(d_B_colInd));
+    CUDA_ERROR(cudaFree(d_B_val));
+    CUDA_ERROR(cudaFree(d_U));
+    CUDA_ERROR(cudaFree(d_Arhs));
+    CUDA_ERROR(cudaFree(d_A));
+    CUDA_ERROR(cudaFree(d_z));
+    free(h_Arhs);
+    free(h_A);
+    free(h_B_rowPtr);
+    free(h_B_colInd);
+    free(h_B_val);
+    free(h_mapBfromQ);
+    free(perm_buffer_cpu);
+
+    CUSOLVER_ERROR(cusolverSpDestroy(cusolver_handle));
+    CUSPARSE_ERROR(cusparseDestroy(cusparse_handle));
+    CUDA_ERROR(cudaStreamDestroy(stream));
+    CUSPARSE_ERROR(cusparseDestroyMatDescr(matQ_desc));
+}
+
 void cusparse_ic0_solver(const std::string&           name,
                          Eigen::SparseMatrix<double>& Q,
                          const Eigen::MatrixXd&       rhs,
