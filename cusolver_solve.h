@@ -1,4 +1,5 @@
 #pragma once
+#include <cublas_v2.h>
 #include <cuda_runtime_api.h>
 #include <cusolverSp.h>
 #include <cusolverSp_LOWLEVEL_PREVIEW.h>
@@ -71,6 +72,47 @@ static inline void cusolverHandleError(cusolverStatus_t status, const char* file
     return;
 }
 #define CUSOLVER_ERROR(err) (cusolverHandleError(err, __FILE__, __LINE__))
+#endif
+
+
+#ifndef _CUBLAS_ERROR_
+#define _CUBLAS_ERROR_
+static inline void cublasHandleError(cublasStatus_t status, const char* file, const int line)
+{
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        auto cusolverGetErrorString = [](cublasStatus_t status) {
+            switch (status) {
+                case CUBLAS_STATUS_SUCCESS:
+                    return "CUBLAS_STATUS_SUCCESS";
+                case CUBLAS_STATUS_NOT_INITIALIZED:
+                    return "CUBLAS_STATUS_NOT_INITIALIZED";
+                case CUBLAS_STATUS_ALLOC_FAILED:
+                    return "CUBLAS_STATUS_ALLOC_FAILED";
+                case CUBLAS_STATUS_INVALID_VALUE:
+                    return "CUBLAS_STATUS_INVALID_VALUE";
+                case CUBLAS_STATUS_ARCH_MISMATCH:
+                    return "CUBLAS_STATUS_ARCH_MISMATCH";
+                case CUBLAS_STATUS_MAPPING_ERROR:
+                    return "CUBLAS_STATUS_MAPPING_ERROR";
+                case CUBLAS_STATUS_EXECUTION_FAILED:
+                    return "CUBLAS_STATUS_EXECUTION_FAILED";
+                case CUBLAS_STATUS_INTERNAL_ERROR:
+                    return "CUBLAS_STATUS_INTERNAL_ERROR";
+                case CUBLAS_STATUS_NOT_SUPPORTED:
+                    return "CUBLAS_STATUS_NOT_SUPPORTED";
+                case CUBLAS_STATUS_LICENSE_ERROR:
+                    return "CUBLAS_STATUS_LICENSE_ERROR";
+                default:
+                    return "UNKNOWN_ERROR";
+            }
+        };
+
+        printf("\n%s in %s at line %d\n", cusolverGetErrorString(status), file, line);
+        exit(EXIT_FAILURE);
+    }
+    return;
+}
+#define CUBLAS_ERROR(err) (cublasHandleError(err, __FILE__, __LINE__))
 #endif
 
 class CUDATimer
@@ -1175,4 +1217,236 @@ void cusparse_ic0_solver(const std::string&           name,
     CUSPARSE_ERROR(cusparseDestroyCsrsv2Info(info_L));
     CUSPARSE_ERROR(cusparseDestroyCsrsv2Info(info_Lt));
     CUSPARSE_ERROR(cusparseDestroy(cusparse_handle));
+}
+
+void cusparse_cg_ilu0_solver(const std::string&           name,
+                             Eigen::SparseMatrix<double>& Q,
+                             const Eigen::MatrixXd&       rhs,
+                             Eigen::MatrixXd&             U)
+{
+    // taken from
+    // https://github.com/tpn/cuda-samples/blob/master/v11.0/7_CUDALibraries/conjugateGradientPrecond/main.cpp
+    if (Q.IsRowMajor()) {
+        printf("Error: Q is row major. No need to transpose it...\n");
+        exit(EXIT_FAILURE);
+    }
+    auto Q_trans = Q.transpose();
+
+    U.resize(rhs.rows(), rhs.cols());
+
+    printf("| %30s | ", name.c_str());
+
+    /* Create CUBLAS context */
+    cublasHandle_t cublasHandle = NULL;
+    CUBLAS_ERROR(cublasCreate(&cublasHandle));
+
+    /* Create CUSPARSE context */
+    cusparseHandle_t cusparseHandle = NULL;
+    CUSPARSE_ERROR(cusparseCreate(&cusparseHandle));
+
+    /* Description of the Q matrix */
+    cusparseMatDescr_t descr = 0;
+    CUSPARSE_ERROR(cusparseCreateMatDescr(&descr));
+    CUSPARSE_ERROR(cusparseSetMatType(descr, CUSPARSE_MATRIX_TYPE_GENERAL));
+    CUSPARSE_ERROR(cusparseSetMatIndexBase(descr, CUSPARSE_INDEX_BASE_ZERO));
+
+    /* Allocate required memory */
+    int     N = Q_trans.rows();
+    int     nz = Q_trans.nonZeros();
+    int *   d_col, *d_row;
+    double *d_val, *d_U, *d_y, *d_r, *d_p, *d_omega, *d_valsILU0, *d_zm1, *d_zm2, *d_rm2;
+    CUDA_ERROR(cudaMalloc((void**)&d_col, nz * sizeof(int)));
+    CUDA_ERROR(cudaMalloc((void**)&d_row, (N + 1) * sizeof(int)));
+    CUDA_ERROR(cudaMalloc((void**)&d_val, nz * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_U, N * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_y, N * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_r, N * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_p, N * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_omega, N * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_valsILU0, nz * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_zm1, (N) * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_zm2, (N) * sizeof(double)));
+    CUDA_ERROR(cudaMalloc((void**)&d_rm2, (N) * sizeof(double)));
+
+
+    /* Wrap raw data into cuSPARSE generic API objects */
+    cusparseSpMatDescr_t matQ = NULL;
+    CUSPARSE_ERROR(cusparseCreateCsr(&matQ, N, N, nz, d_row, d_col, d_val, CUSPARSE_INDEX_32I,
+                                     CUSPARSE_INDEX_32I, CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F));
+    cusparseDnVecDescr_t vecp = NULL;
+    CUSPARSE_ERROR(cusparseCreateDnVec(&vecp, N, d_p, CUDA_R_64F));
+    cusparseDnVecDescr_t vecomega = NULL;
+    CUSPARSE_ERROR(cusparseCreateDnVec(&vecomega, N, d_omega, CUDA_R_64F));
+
+
+    /* Initialize problem data */
+    CUDA_ERROR(
+        cudaMemcpy(d_col, Q_trans.innerIndexPtr(), nz * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_ERROR(
+        cudaMemcpy(d_row, Q_trans.outerIndexPtr(), (N + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_ERROR(cudaMemcpy(d_val, Q_trans.valuePtr(), nz * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_ERROR(cudaMemset(d_y, 0, sizeof(double) * N));
+    CUDA_ERROR(cudaMemset(d_U, 0, N * sizeof(double)));
+    // TODO
+    CUDA_ERROR(cudaMemcpy(d_r, rhs.col(0).data(), N * sizeof(double), cudaMemcpyHostToDevice));
+
+
+    /* Create ILU(0) info object */
+    csrilu02Info_t infoILU = NULL;
+    CUSPARSE_ERROR(cusparseCreateCsrilu02Info(&infoILU));
+
+    /* Create L factor descriptor and triangular solve info */
+    cusparseMatDescr_t descrL = NULL;
+    CUSPARSE_ERROR(cusparseCreateMatDescr(&descrL));
+    CUSPARSE_ERROR(cusparseSetMatType(descrL, CUSPARSE_MATRIX_TYPE_GENERAL));
+    CUSPARSE_ERROR(cusparseSetMatIndexBase(descrL, CUSPARSE_INDEX_BASE_ZERO));
+    CUSPARSE_ERROR(cusparseSetMatFillMode(descrL, CUSPARSE_FILL_MODE_LOWER));
+    CUSPARSE_ERROR(cusparseSetMatDiagType(descrL, CUSPARSE_DIAG_TYPE_UNIT));
+    csrsv2Info_t infoL = NULL;
+    CUSPARSE_ERROR(cusparseCreateCsrsv2Info(&infoL));
+
+    /* Create U factor descriptor and triangular solve info */
+    cusparseMatDescr_t descrU = NULL;
+    CUSPARSE_ERROR(cusparseCreateMatDescr(&descrU));
+    CUSPARSE_ERROR(cusparseSetMatType(descrU, CUSPARSE_MATRIX_TYPE_GENERAL));
+    CUSPARSE_ERROR(cusparseSetMatIndexBase(descrU, CUSPARSE_INDEX_BASE_ZERO));
+    CUSPARSE_ERROR(cusparseSetMatFillMode(descrU, CUSPARSE_FILL_MODE_UPPER));
+    CUSPARSE_ERROR(cusparseSetMatDiagType(descrU, CUSPARSE_DIAG_TYPE_NON_UNIT));
+    csrsv2Info_t infoU = NULL;
+    CUSPARSE_ERROR(cusparseCreateCsrsv2Info(&infoU));
+
+
+    /* Allocate workspace for cuSPARSE */
+    size_t       bufferSize = 0;
+    size_t       tmp = 0;
+    int          stmp = 0;
+    const double one = 1.0;
+    const double zero = 0.0;
+    CUSPARSE_ERROR(cusparseSpMV_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one,
+                                           matQ, vecp, &zero, vecomega, CUDA_R_64F,
+                                           CUSPARSE_MV_ALG_DEFAULT, &tmp));
+    if (tmp > bufferSize) {
+        bufferSize = stmp;
+    }
+    CUSPARSE_ERROR(cusparseDcsrilu02_bufferSize(cusparseHandle, N, nz, descr, d_val, d_row, d_col,
+                                                infoILU, &stmp));
+    if (stmp > bufferSize) {
+        bufferSize = stmp;
+    }
+    CUSPARSE_ERROR(cusparseDcsrsv2_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N,
+                                              nz, descrL, d_val, d_row, d_col, infoL, &stmp));
+    if (stmp > bufferSize) {
+        bufferSize = stmp;
+    }
+    CUSPARSE_ERROR(cusparseDcsrsv2_bufferSize(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N,
+                                              nz, descrU, d_val, d_row, d_col, infoU, &stmp));
+    if (stmp > bufferSize) {
+        bufferSize = stmp;
+    }
+    void* buffer = NULL;
+    CUDA_ERROR(cudaMalloc(&buffer, bufferSize));
+
+
+    /* Copy Q data to ILU(0) vals as input*/
+    CUDA_ERROR(cudaMemcpy(d_valsILU0, d_val, nz * sizeof(double), cudaMemcpyDeviceToDevice));
+
+
+    CPUTimer cpu_timer;
+    cpu_timer.start();
+    /* Perform analysis for ILU(0) */
+    CUSPARSE_ERROR(cusparseDcsrilu02_analysis(cusparseHandle, N, nz, descr, d_val, d_row, d_col,
+                                              infoILU, CUSPARSE_SOLVE_POLICY_USE_LEVEL, buffer));
+
+    /* generate the ILU(0) factors */
+    CUSPARSE_ERROR(cusparseDcsrilu02(cusparseHandle, N, nz, descr, d_valsILU0, d_row, d_col,
+                                     infoILU, CUSPARSE_SOLVE_POLICY_USE_LEVEL, buffer));
+
+    /* perform triangular solve analysis */
+    CUSPARSE_ERROR(cusparseDcsrsv2_analysis(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N, nz,
+                                            descrL, d_valsILU0, d_row, d_col, infoL,
+                                            CUSPARSE_SOLVE_POLICY_USE_LEVEL, buffer));
+    CUSPARSE_ERROR(cusparseDcsrsv2_analysis(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N, nz,
+                                            descrU, d_valsILU0, d_row, d_col, infoU,
+                                            CUSPARSE_SOLVE_POLICY_USE_LEVEL, buffer));
+
+    cpu_timer.stop();
+    printf("%6.2g secs | ", (cpu_timer.elapsed_millis() * 0.001));
+
+
+    int    k = 0;
+    double r1;
+    CUBLAS_ERROR(cublasDdot(cublasHandle, N, d_r, 1, d_r, 1, &r1));
+    const int max_iter = 1000;
+    double    tol = 1.0e-8;
+    double    numerator, denominator, beta, alpha, nalpha;
+
+    cpu_timer.start();
+    while (r1 > tol * tol && k <= max_iter) {
+        // preconditioner application: d_zm1 = U^-1 L^-1 d_r
+        CUSPARSE_ERROR(cusparseDcsrsv2_solve(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N,
+                                             nz, &one, descrL, d_valsILU0, d_row, d_col, infoL, d_r,
+                                             d_y, CUSPARSE_SOLVE_POLICY_USE_LEVEL, buffer));
+
+        CUSPARSE_ERROR(cusparseDcsrsv2_solve(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N,
+                                             nz, &one, descrU, d_valsILU0, d_row, d_col, infoU, d_y,
+                                             d_zm1, CUSPARSE_SOLVE_POLICY_USE_LEVEL, buffer));
+
+        k++;
+
+        if (k == 1) {
+            CUBLAS_ERROR(cublasDcopy(cublasHandle, N, d_zm1, 1, d_p, 1));
+        } else {
+
+            CUBLAS_ERROR(cublasDdot(cublasHandle, N, d_r, 1, d_zm1, 1, &numerator));
+            CUBLAS_ERROR(cublasDdot(cublasHandle, N, d_rm2, 1, d_zm2, 1, &denominator));
+            beta = numerator / denominator;
+            CUBLAS_ERROR(cublasDscal(cublasHandle, N, &beta, d_p, 1));
+            CUBLAS_ERROR(cublasDaxpy(cublasHandle, N, &one, d_zm1, 1, d_p, 1));
+        }
+
+        CUSPARSE_ERROR(cusparseSpMV(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, &one, matQ,
+                                    vecp, &zero, vecomega, CUDA_R_64F, CUSPARSE_MV_ALG_DEFAULT,
+                                    buffer));
+        CUBLAS_ERROR(cublasDdot(cublasHandle, N, d_r, 1, d_zm1, 1, &numerator));
+        CUBLAS_ERROR(cublasDdot(cublasHandle, N, d_p, 1, d_omega, 1, &denominator));
+        alpha = numerator / denominator;
+        CUBLAS_ERROR(cublasDaxpy(cublasHandle, N, &alpha, d_p, 1, d_U, 1));
+        CUBLAS_ERROR(cublasDcopy(cublasHandle, N, d_r, 1, d_rm2, 1));
+        CUBLAS_ERROR(cublasDcopy(cublasHandle, N, d_zm1, 1, d_zm2, 1));
+        nalpha = -alpha;
+        CUBLAS_ERROR(cublasDaxpy(cublasHandle, N, &nalpha, d_omega, 1, d_r, 1));
+        CUBLAS_ERROR(cublasDdot(cublasHandle, N, d_r, 1, d_r, 1, &r1));
+    }
+    cpu_timer.stop();
+    printf("%6.2g secs | ", (cpu_timer.elapsed_millis() * 0.001));
+    printf("%6.6g |\n", (rhs - Q * U).array().abs().maxCoeff());
+
+    /* Destroy descriptors */
+    CUSPARSE_ERROR(cusparseDestroyCsrsv2Info(infoU));
+    CUSPARSE_ERROR(cusparseDestroyCsrsv2Info(infoL));
+    CUSPARSE_ERROR(cusparseDestroyCsrilu02Info(infoILU));
+    CUSPARSE_ERROR(cusparseDestroyMatDescr(descrL));
+    CUSPARSE_ERROR(cusparseDestroyMatDescr(descrU));
+    CUSPARSE_ERROR(cusparseDestroyMatDescr(descr));
+    CUSPARSE_ERROR(cusparseDestroySpMat(matQ));
+    CUSPARSE_ERROR(cusparseDestroyDnVec(vecp));
+    CUSPARSE_ERROR(cusparseDestroyDnVec(vecomega));
+
+    /* Destroy contexts */
+    CUSPARSE_ERROR(cusparseDestroy(cusparseHandle));
+    CUBLAS_ERROR(cublasDestroy(cublasHandle));
+
+    CUDA_ERROR(cudaFree(buffer));
+    CUDA_ERROR(cudaFree(d_col));
+    CUDA_ERROR(cudaFree(d_row));
+    CUDA_ERROR(cudaFree(d_val));
+    CUDA_ERROR(cudaFree(d_U));
+    CUDA_ERROR(cudaFree(d_y));
+    CUDA_ERROR(cudaFree(d_r));
+    CUDA_ERROR(cudaFree(d_p));
+    CUDA_ERROR(cudaFree(d_omega));
+    CUDA_ERROR(cudaFree(d_valsILU0));
+    CUDA_ERROR(cudaFree(d_zm1));
+    CUDA_ERROR(cudaFree(d_zm2));
+    CUDA_ERROR(cudaFree(d_rm2));
 }

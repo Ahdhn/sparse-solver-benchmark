@@ -18,6 +18,7 @@
 #include "catamari.hpp"
 
 #include <cuda_runtime_api.h>
+#include <igl/../../eigen/unsupported/Eigen/SparseExtra>
 #include "cusolver_solve.h"
 
 void spy(const std::string& in_fileName, Eigen::SparseMatrix<double>& mat, bool convertToPNG = true)
@@ -193,6 +194,9 @@ int main(int argc, char* argv[])
             Q.makeCompressed();
         }
 
+        //Eigen::saveMarket(Q, "Q.mm");
+        //Eigen::saveMarketVector(rhs, "rhs.mm");
+
 
         printf("matrix rows= %d, cols= %d, nnz= %d", Q.rows(), Q.cols(), Q.nonZeros());
         // spy("Q_" + std::to_string(k), Q);
@@ -204,9 +208,10 @@ int main(int argc, char* argv[])
         if (num_devices != 0) {
             cusolver_solver_low_level_preview_reordered("cusolver (Preview/reorder)", Q, rhs, U);
             cusolver_solver_high_level("cusolver (High)", Q, rhs, U);
+            cusparse_cg_ilu0_solver("cusparse CG/ILU0", Q, rhs, U);
 
-            //cusolver_solver_low_level("cusolver (Low)", Q, rhs, U);
-            //cusolver_solver_low_level_preview("cusolver (Preview)", Q, rhs, U);            
+            // cusolver_solver_low_level("cusolver (Low)", Q, rhs, U);
+            // cusolver_solver_low_level_preview("cusolver (Preview)", Q, rhs, U);
             // cusparse_ic0_solver("cusparse_solver (IC0)", Q, rhs, U);
         }
         solve<Eigen::CholmodSupernodalLLT<Eigen::SparseMatrix<double>>>(
