@@ -24,7 +24,7 @@ if(COMPILER_SUPPORTS_MARCH_NATIVE)
 endif()
 
 # openmp
-find_package(OPENMP REQUIRED QUIET)
+find_package(OpenMP REQUIRED QUIET)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
@@ -42,6 +42,8 @@ add_executable(${PROJECT_NAME} ${SRCFILES})
 target_link_libraries(${PROJECT_NAME} igl::core OpenMP::OpenMP_CXX)
 
 if(IGL_WITH_MKL)
+  #list(APPEND CMAKE_PREFIX_PATH "/home/ahmed/miniconda3/lib/")
+  #list(APPEND CMAKE_INCLUDE_PATH "/home/ahmed/miniconda3/pkgs/mkl-include-2022.1.0-h06a4308_224/include")
   find_package(MKL REQUIRED)
   target_compile_definitions(${PROJECT_NAME} PUBLIC -DIGL_WITH_MKL)
   target_compile_definitions(${PROJECT_NAME} PUBLIC -DEIGEN_USE_MKL_ALL)

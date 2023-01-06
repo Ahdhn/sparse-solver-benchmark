@@ -18,7 +18,6 @@
 #include "catamari.hpp"
 
 #include <cuda_runtime_api.h>
-#include <igl/../../eigen/unsupported/Eigen/SparseExtra>
 #include "cusolver_solve.h"
 
 void spy(const std::string& in_fileName, Eigen::SparseMatrix<double>& mat, bool convertToPNG = true)

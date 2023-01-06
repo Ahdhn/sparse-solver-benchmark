@@ -181,7 +181,7 @@ void cusolver_solver_high_level(const std::string&           name,
                                 const Eigen::MatrixXd&       rhs,
                                 Eigen::MatrixXd&             U)
 {
-    if (Q.IsRowMajor()) {
+    if (Q.IsRowMajor) {
         printf("Error: Q is row major. No need to transpose it...\n");
         exit(EXIT_FAILURE);
     }
@@ -318,7 +318,7 @@ void cusolver_solver_low_level(const std::string&           name,
      * The three steps are
      *  (A*Q*A')*(A*U) = (A*rhs)
      */
-    if (Q.IsRowMajor()) {
+    if (Q.IsRowMajor) {
         printf("Error: Q is row major. No need to transpose it...\n");
         exit(EXIT_FAILURE);
     }
@@ -573,7 +573,7 @@ void cusolver_solver_low_level_preview(const std::string&           name,
                                        const Eigen::MatrixXd&       rhs,
                                        Eigen::MatrixXd&             U)
 {
-    if (Q.IsRowMajor()) {
+    if (Q.IsRowMajor) {
         printf("Error: Q is row major. No need to transpose it...\n");
         exit(EXIT_FAILURE);
     }
@@ -733,7 +733,7 @@ void cusolver_solver_low_level_preview_reordered(const std::string&           na
      * The three steps are
      *  (A*Q*A')*(A*U) = (A*rhs)
      */
-    if (Q.IsRowMajor()) {
+    if (Q.IsRowMajor) {
         printf("Error: Q is row major. No need to transpose it...\n");
         exit(EXIT_FAILURE);
     }
@@ -1027,7 +1027,7 @@ void cusparse_ic0_solver(const std::string&           name,
     // taken from https://docs.nvidia.com/cuda/cusparse/index.html#csric02
     // M = L*L^{T}
 
-    if (Q.IsRowMajor()) {
+    if (Q.IsRowMajor) {
         printf("Error: Q is row major. No need to transpose it...\n");
         exit(EXIT_FAILURE);
     }
@@ -1226,7 +1226,7 @@ void cusparse_cg_ilu0_solver(const std::string&           name,
 {
     // taken from
     // https://github.com/tpn/cuda-samples/blob/master/v11.0/7_CUDALibraries/conjugateGradientPrecond/main.cpp
-    if (Q.IsRowMajor()) {
+    if (Q.IsRowMajor) {
         printf("Error: Q is row major. No need to transpose it...\n");
         exit(EXIT_FAILURE);
     }
