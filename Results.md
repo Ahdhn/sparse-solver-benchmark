@@ -1,4 +1,4 @@
-# **Big Matrix**
+# **Big Matrix** ([link to input](https://ucdavis365-my.sharepoint.com/:u:/g/personal/ahmahmoud_ucdavis_edu/ESAbEmxoe4RJqrl__bdsfX8BraXH4Bh9E1Ptr7Pz9conPg?e=2AFBkd))
 ## *RTX A6000* 
 
 > # Harmonic
@@ -76,7 +76,7 @@
 
 
 
-# **Medium  Matrix**
+# **Medium  Matrix** ([link to input](https://github.com/Ahdhn/sparse-solver-benchmark/blob/main/xyzrgb_dragon-720K.ply))
 ## *RTX A6000* 
 
 > # harmonic
@@ -157,7 +157,7 @@
 > |     cusolver (Preview/reorder) |     14 secs |   0.32 secs | 9.55742 |
 > |                cusolver (High) |      0 secs | ALLOC_FAILED |
 
-# **Small Matrix**
+# **Small Matrix** ([link to input](https://ucdavis365-my.sharepoint.com/:u:/g/personal/ahmahmoud_ucdavis_edu/ETjTF3jomO5OkvPECOE07J0BoDHHw2XWBRh-9SAXaPhG9w?e=xfWLUi))
 ## *RTX A6000* 
 
 > # Harmonic
