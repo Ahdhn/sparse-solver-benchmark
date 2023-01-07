@@ -1,5 +1,5 @@
 # **Big Matrix**
-# RTX A6000 
+## *RTX A6000* 
 
 > # Harmonic
 >
@@ -16,8 +16,37 @@
 > |              Eigen::PardisoLLT |    6.6 secs |    3.4 secs | 7.35412e-13 |
 > |                Eigen::SparseLU |     52 secs |    1.2 secs | 3.52429e-12 |
 
+> # Biharmonic
+> matrix rows= 1009118, cols= 1009118, nnz= 20693752
+> 
+> |                         Method |      Factor |       Solve |  L_inf norm |
+> |-------------------------------:|------------:|------------:|------------:|
+> |     cusolver (Preview/reorder) |     20 secs |   0.34 secs | 2.17649e-08 |
+> |                cusolver (High) |      0 secs |    ALLOC_FAILED
+> |    Eigen::CholmodSupernodalLLT |     13 secs |      1 secs | 4.67912e-09 |
+> |           Eigen::SimplicialLLT | 1.7e+02 secs |    1.9 secs | 6.61521e-09 |
+> |          Eigen::SimplicialLDLT | 1.6e+02 secs |    1.8 secs | 1.11711e-08 |
+> |            catamari::SparseLDL | 7.1e+02 secs |    2.9 secs | 6.76262e-09 |
+> |              Eigen::PardisoLLT |     13 secs |      3 secs | 1.36159e-08 |
+> |                Eigen::SparseLU | 4.1e+02 secs |    3.7 secs | 7.33891e-09 |
 
-# A100
+> # Triharmonic
+> matrix rows= 1009118, cols= 1009118, nnz= 42921650
+> 
+> |                         Method |      Factor |       Solve |  L_inf norm |
+> |-------------------------------:|------------:|------------:|------------:|
+> |     cusolver (Preview/reorder) |     45 secs |   0.59 secs | 0.000220632 |
+> |                cusolver (High) |      0 secs |    ALLOC_FAILED
+> |    Eigen::CholmodSupernodalLLT |     25 secs |    1.5 secs | 0.000287713 |
+> |           Eigen::SimplicialLLT | 5.7e+02 secs |    4.1 secs | 0.000467 |
+> |          Eigen::SimplicialLDLT | 5.8e+02 secs |    3.8 secs | 0.000220108 |
+> |            catamari::SparseLDL | 3.1e+03 secs |    7.2 secs | 0.00034493 |
+> |              Eigen::PardisoLLT |     26 secs |    4.4 secs | 0.000222996 |
+> |                Eigen::SparseLU | 1.5e+03 secs |    7.9 secs | 0.00228721 |
+
+
+## *A100*
+
 > # Harmonic
 >
 > matrix rows= 1009118, cols= 1009118, nnz= 7063814
@@ -48,7 +77,7 @@
 
 
 # **Medium  Matrix**
-# RTX A6000 
+## *RTX A6000* 
 
 > # harmonic
 >
@@ -103,7 +132,7 @@
 
 
 
-# A100
+## *A100*
 
 > # Harmonic
 > 
@@ -129,7 +158,7 @@
 > |                cusolver (High) |      0 secs | ALLOC_FAILED |
 
 # **Small Matrix**
-# RTX A6000 
+## *RTX A6000* 
 
 > # Harmonic
 >
@@ -178,8 +207,8 @@
 > -----------------------------------------------------------------------------
 
 
-# A100
->
+## *A100*
+
 > # Harmonic
 >
 > matrix rows= 29921, cols= 29921, nnz= 209435
