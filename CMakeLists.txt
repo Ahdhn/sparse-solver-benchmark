@@ -1,6 +1,11 @@
 #On Windows, first install oneAPI from here https://software.intel.com/content/www/us/en/develop/tools/oneapi/base-toolkit/download.html?operatingsystem=window&distributions=webdownload&options=offline
 #and then run "C:\Program Files (x86)\Intel\oneAPI\setvars.bat" 
 
+#On Linux, 
+# Install mkl and mkl-include through miniconda as 
+# >> conda install -c anaconda mkl-include
+# >> conda install -c anaconda mkl
+# You need to add miniconda lin and mkl include dir as shown in the commented lines below "if(IGL_WITH_MKL)" (Line 49) 
 cmake_minimum_required(VERSION 3.1)
 project(sparse_solver_benchmark LANGUAGES CUDA CXX C) 
 
